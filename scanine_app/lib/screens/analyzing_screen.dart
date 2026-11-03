@@ -609,15 +609,19 @@ class _AnalyzingScreenState extends State<AnalyzingScreen>
   String _agreementText() {
     final v = _vote;
     if (v == null) return 'Finalizing screening summary…';
-    final unit = _useTta ? 'views' : 'frames';
-    final base = '${v.agree} of ${v.total} $unit agree';
+    // An upload is one frame; its augmented views are internal, so don't
+    // count them in front of the user.
+    if (_useTta) return '1 photo analyzed';
+    final base = '${v.agree} of ${v.total} frames agree';
     return v.agree == v.total ? base : '$base · mixed results';
   }
 
-  String _headerText() {
-    if (_useTta) return 'SINGLE PHOTO';
-    return 'ANALYZED $_framesDone / ${widget.imagePaths.length}';
-  }
+  /// Frames actually classified so far (an upload counts as one frame).
+  int get _doneCount =>
+      _useTta ? (_thumbResults.first != null ? 1 : 0) : _framesDone;
+
+  String _headerText() =>
+      'ANALYZED $_doneCount / ${widget.imagePaths.length}';
 
   // ── Build ──────────────────────────────────────────────────────────────────
 
@@ -627,7 +631,8 @@ class _AnalyzingScreenState extends State<AnalyzingScreen>
       value: const SystemUiOverlayStyle(
         statusBarColor: Colors.transparent,
         statusBarIconBrightness: Brightness.dark,
-        systemNavigationBarColor: _cloudBg,
+        systemNavigationBarColor: Colors.transparent,
+        systemNavigationBarContrastEnforced: false,
         systemNavigationBarIconBrightness: Brightness.dark,
         systemNavigationBarDividerColor: Colors.transparent,
       ),
@@ -678,7 +683,7 @@ class _AnalyzingScreenState extends State<AnalyzingScreen>
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        CaptureProgressBar(currentIndex: n, totalFrames: n),
+        CaptureProgressBar(currentIndex: _doneCount, totalFrames: n),
         Text(
           _headerText(),
           style: const TextStyle(
@@ -805,7 +810,9 @@ class _AnalyzingScreenState extends State<AnalyzingScreen>
       label: _thumbSemantics(),
       excludeSemantics: true,
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        mainAxisAlignment: widget.imagePaths.length == 1
+            ? MainAxisAlignment.center
+            : MainAxisAlignment.spaceBetween,
         children: List.generate(widget.imagePaths.length, (i) {
           final img = i < _thumbs.length ? _thumbs[i] : null;
           final result = i < _thumbResults.length ? _thumbResults[i] : null;

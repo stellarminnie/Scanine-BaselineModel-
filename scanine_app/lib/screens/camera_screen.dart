@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../ml/image_quality.dart';
+import '../ml/subject_check.dart';
 import '../theme/routes.dart';
 import '../theme/tokens.dart';
 import '../widgets/scanine_mark.dart';
@@ -296,6 +297,22 @@ class _CameraScreenState extends State<CameraScreen> {
           continue;
         }
 
+        // Dog check once per burst, on the first good frame: a clear
+        // non-dog scene restarts the burst instead of screening it.
+        if (_shots.isEmpty && controller != null && _ready) {
+          final subject = await SubjectCheck.assessFile(shotPath);
+          if (subject.isNotDog) {
+            try {
+              await File(shotPath).delete();
+            } catch (_) {}
+            if (mounted) {
+              setState(() => _rejectWarning =
+                  "No dog found. Point the camera at your dog's skin.");
+            }
+            return;
+          }
+        }
+
         // Frame passed the quality gate
         _shots.add(shotPath);
         accepted++;
@@ -339,7 +356,8 @@ class _CameraScreenState extends State<CameraScreen> {
       value: const SystemUiOverlayStyle(
         statusBarColor: Colors.transparent,
         statusBarIconBrightness: Brightness.dark,
-        systemNavigationBarColor: cloudBg,
+        systemNavigationBarColor: Colors.transparent,
+        systemNavigationBarContrastEnforced: false,
         systemNavigationBarIconBrightness: Brightness.dark,
         systemNavigationBarDividerColor: Colors.transparent,
       ),

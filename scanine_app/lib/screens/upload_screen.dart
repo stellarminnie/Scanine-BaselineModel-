@@ -4,8 +4,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../ml/image_quality.dart';
+import '../ml/subject_check.dart';
 import 'analyzing_screen.dart';
+import 'crop_screen.dart';
 import '../theme/routes.dart';
+import '../theme/tokens.dart';
 import '../widgets/scanine_mark.dart';
 
 class UploadScreen extends StatefulWidget {
@@ -17,8 +21,11 @@ class UploadScreen extends StatefulWidget {
 
 class _UploadScreenState extends State<UploadScreen> {
   final _picker = ImagePicker();
-  String? _path;
+  String? _path; // cropped photo that gets analyzed
+  String? _originalPath; // as picked, so "Adjust" can re-crop from scratch
   String? _error;
+  _UploadIssue? _issue; // quality or dog-check problem with the selected photo
+  bool _checking = false;
 
   static const navy = Color(0xFF073858);
   static const background = Color(0xFFF5FAFC);
@@ -33,15 +40,49 @@ class _UploadScreenState extends State<UploadScreen> {
       );
       if (shot == null) return; // user cancelled
       if (!mounted) return;
-      setState(() => _path = shot.path);
+      await _crop(shot.path);
     } catch (e) {
       if (!mounted) return;
       setState(() => _error = "Couldn't access gallery. Please try again.");
     }
   }
 
-  void _analyze() {
-    if (_path == null) return;
+  /// Opens the crop step; backing out keeps the previous selection.
+  Future<void> _crop(String original) async {
+    final cropped = await AppRoutes.push<String>(
+      context,
+      (_) => CropScreen(path: original),
+    );
+    if (cropped == null || !mounted) return;
+    setState(() {
+      _originalPath = original;
+      _path = cropped;
+      _issue = null;
+    });
+  }
+
+  /// Runs the same blur/light gate as the camera, plus the dog check. A
+  /// problem is shown with "Analyze anyway", since either check can be wrong.
+  Future<void> _analyze() async {
+    final path = _path;
+    if (path == null || _checking) return;
+    setState(() {
+      _checking = true;
+      _issue = null;
+    });
+    final quality = QualityGate.assessFile(path);
+    final subject = SubjectCheck.assessFile(path);
+    final q = await quality;
+    final s = await subject;
+    if (!mounted) return;
+    setState(() {
+      _checking = false;
+      _issue = s.isNotDog ? _UploadIssue.noDog : _UploadIssue.fromQuality(q);
+    });
+    if (_issue == null) _proceed();
+  }
+
+  void _proceed() {
     AppRoutes.pushReplacement(
       context,
       (_) => AnalyzingScreen(imagePaths: [_path!]),
@@ -101,10 +142,7 @@ class _UploadScreenState extends State<UploadScreen> {
                         ),
                       ),
                     ),
-                    const ScanineWordmark(
-                      fontSize: 22,
-                      color: navy,
-                    ),
+                    const ScanineMark(size: 32),
                     const SizedBox(width: 44), // Balancer
                   ],
                 ),
@@ -142,17 +180,19 @@ class _UploadScreenState extends State<UploadScreen> {
                       ? _PreviewCard(
                           path: _path!,
                           onChangePhoto: _pick,
+                          onAdjust: () => _crop(_originalPath!),
+                          issue: _issue,
                         )
-                      : _UploadDropzoneCard(
-                          onTap: _pick,
-                        ),
+                      : _UploadDropzoneCard(onTap: _pick),
                 ),
 
                 if (_error != null) ...[
                   const SizedBox(height: 12),
                   Container(
                     padding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 10),
+                      horizontal: 16,
+                      vertical: 10,
+                    ),
                     decoration: BoxDecoration(
                       color: const Color(0xFFF9EBEF),
                       borderRadius: BorderRadius.circular(12),
@@ -184,7 +224,9 @@ class _UploadScreenState extends State<UploadScreen> {
                     width: double.infinity,
                     height: 60,
                     child: ElevatedButton(
-                      onPressed: _analyze,
+                      // With a warning showing, rechecking gives the same
+                      // answer, so the main action becomes picking again.
+                      onPressed: _issue != null ? _pick : _analyze,
                       style: ElevatedButton.styleFrom(
                         backgroundColor: navy,
                         foregroundColor: Colors.white,
@@ -194,19 +236,46 @@ class _UploadScreenState extends State<UploadScreen> {
                         ),
                         padding: const EdgeInsets.symmetric(horizontal: 24),
                       ),
-                      child: const Text(
-                        'Start screening',
-                        style: TextStyle(
-                          fontFamily: 'InstrumentSans',
-                          fontSize: 16.5,
-                          fontWeight: FontWeight.w600,
-                          letterSpacing: -0.3,
+                      child: _checking
+                          ? const SizedBox.square(
+                              dimension: 22,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2.4,
+                                color: Colors.white,
+                              ),
+                            )
+                          : Text(
+                              _issue != null
+                                  ? 'Choose another photo'
+                                  : 'Start screening',
+                              style: const TextStyle(
+                                fontFamily: 'InstrumentSans',
+                                fontSize: 16.5,
+                                fontWeight: FontWeight.w600,
+                                letterSpacing: -0.3,
+                              ),
+                            ),
+                    ),
+                  ),
+                  if (_issue != null)
+                    SizedBox(
+                      width: double.infinity,
+                      height: 44,
+                      child: TextButton(
+                        onPressed: _proceed,
+                        style: TextButton.styleFrom(foregroundColor: T.ink2),
+                        child: const Text(
+                          'Use this photo anyway',
+                          style: TextStyle(
+                            fontFamily: 'InstrumentSans',
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                       ),
                     ),
-                  ),
                   // Pad below button so it sits above the system nav bar
-                  SizedBox(height: bottomInset + 16),
+                  SizedBox(height: bottomInset + (_issue != null ? 4 : 16)),
                 ] else
                   SizedBox(height: bottomInset + 16),
               ],
@@ -215,6 +284,39 @@ class _UploadScreenState extends State<UploadScreen> {
         ),
       ),
     );
+  }
+}
+
+/// A problem found with an uploaded photo, worded for uploads (the camera's
+/// "hold steady" hints don't apply to a photo that's already taken). Shown in
+/// the photo card's status line, the way the camera shows quality readouts.
+class _UploadIssue {
+  const _UploadIssue(this.status, this.hint);
+
+  final String status; // short, replaces "Ready"
+  final String hint; // one line under the status
+
+  static const noDog = _UploadIssue(
+      'No dog found', "Choose a close-up of your dog's skin.");
+
+  static _UploadIssue? fromQuality(QualityAssessment q) {
+    if (q.focus == FocusStatus.checking) return null; // couldn't assess
+    if (q.focus == FocusStatus.blurry) {
+      return const _UploadIssue(
+          'Looks blurry', 'A sharper photo gives a more reliable result.');
+    }
+    switch (q.light) {
+      case LightStatus.tooDark:
+      case LightStatus.lowLight:
+        return const _UploadIssue(
+            'Too dark', 'Try a photo taken in brighter light.');
+      case LightStatus.tooBright:
+        return const _UploadIssue(
+            'Too bright', 'Try a photo without strong glare.');
+      case LightStatus.adequate:
+      case LightStatus.checking:
+        return null;
+    }
   }
 }
 
@@ -291,12 +393,21 @@ class _PreviewCard extends StatelessWidget {
   const _PreviewCard({
     required this.path,
     required this.onChangePhoto,
+    required this.onAdjust,
+    this.issue,
   });
 
   final String path;
   final VoidCallback onChangePhoto;
+  final VoidCallback onAdjust;
+  final _UploadIssue? issue;
 
   static const navy = Color(0xFF073858);
+
+  // Same pair the app already uses for "not quite right": the camera's warm
+  // amber readouts and the result screen's "Low confidence" text.
+  static const amber = Color(0xFFD49339);
+  static const amberInk = Color(0xFF8A5A00);
 
   @override
   Widget build(BuildContext context) {
@@ -316,58 +427,81 @@ class _PreviewCard extends StatelessWidget {
       padding: const EdgeInsets.all(16),
       child: Column(
         children: [
+          // The crop is square, so show it square rather than re-cropping it.
           Expanded(
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(18),
-              child: Image.file(
-                File(path),
-                width: double.infinity,
-                fit: BoxFit.cover,
+            child: Center(
+              child: AspectRatio(
+                aspectRatio: 1,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(18),
+                  child: Image.file(File(path), fit: BoxFit.cover),
+                ),
               ),
             ),
           ),
           const SizedBox(height: 12),
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Row(
-                children: [
-                  Icon(
-                    Icons.check_circle_rounded,
-                    color: navy,
-                    size: 18,
-                  ),
-                  SizedBox(width: 6),
-                  Text(
-                    'Photo loaded',
-                    style: TextStyle(
-                      fontFamily: 'InstrumentSans',
-                      fontSize: 13.5,
-                      fontWeight: FontWeight.w600,
-                      color: navy,
-                    ),
-                  ),
-                ],
+              Icon(
+                issue == null
+                    ? Icons.check_circle_rounded
+                    : Icons.error_rounded,
+                color: issue == null ? navy : amber,
+                size: 18,
               ),
-              TextButton.icon(
-                onPressed: onChangePhoto,
-                icon: const Icon(Icons.refresh_rounded, size: 16),
-                label: const Text(
-                  'Change',
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  issue?.status ?? 'Ready',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontFamily: 'InstrumentSans',
                     fontSize: 13.5,
                     fontWeight: FontWeight.w600,
+                    color: issue == null ? navy : amberInk,
                   ),
                 ),
-                style: TextButton.styleFrom(
-                  foregroundColor: navy,
-                ),
               ),
+              _action(Icons.crop_rounded, 'Adjust', onAdjust),
+              _action(Icons.refresh_rounded, 'Change', onChangePhoto),
             ],
           ),
+          if (issue != null)
+            Padding(
+              // Lines up with the status text, past the icon.
+              padding: const EdgeInsets.only(left: 24, right: 8, bottom: 4),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  issue!.hint,
+                  style: const TextStyle(
+                    fontFamily: 'InstrumentSans',
+                    fontSize: 13,
+                    height: 1.35,
+                    color: T.ink2,
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
+    );
+  }
+
+  Widget _action(IconData icon, String label, VoidCallback onTap) {
+    return TextButton.icon(
+      onPressed: onTap,
+      icon: Icon(icon, size: 16),
+      label: Text(
+        label,
+        style: const TextStyle(
+          fontFamily: 'InstrumentSans',
+          fontSize: 13.5,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+      style: TextButton.styleFrom(foregroundColor: navy),
     );
   }
 }
